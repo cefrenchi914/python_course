@@ -1,0 +1,74 @@
+name: Module Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    # only run for PRs from a branch named exactly module_<N>, e.g. module_0, module_3
+    if: startsWith(github.head_ref, 'module_')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve module from branch name
+        id: module
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          if [[ ! "$BRANCH" =~ ^module_[0-9]+$ ]]; then
+            echo "Branch '$BRANCH' is not a valid module_<N> branch, skipping."
+            exit 1
+          fi
+          if [ ! -d "tests/$BRANCH" ]; then
+            echo "No tests found for '$BRANCH' (expected tests/$BRANCH)."
+            exit 1
+          fi
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests for ${{ steps.module.outputs.name }}
+        id: run_tests
+        continue-on-error: true
+        run: |
+          pytest "tests/${{ steps.module.outputs.name }}" -v | tee pytest_output.txt
+
+      - name: Comment score on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const moduleName = "${{ steps.module.outputs.name }}";
+            const output = fs.readFileSync('pytest_output.txt', 'utf8');
+            const trimmed = output.length > 60000 ? output.slice(-60000) : output;
+            const passed = "${{ steps.run_tests.outcome }}" === "success";
+            const body = [
+              `### ${passed ? "✅" : "❌"} ${moduleName} test results`,
+              "",
+              "```",
+              trimmed.trim(),
+              "```",
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail workflow if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: exit 1
